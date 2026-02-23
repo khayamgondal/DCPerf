@@ -484,10 +484,28 @@ generate_standalone_executable () {
   # shellcheck disable=SC2086
   SHARED_LIBS=$(find ./_skbuild/linux-${MACHINE_NAME_LC}-${actual_pyver} -name "*.so" -printf "%p:fbgemm_gpu\n")
 
+  # Collect system shared libraries that fbgemm_gpu_py.so depends on at
+  # runtime but that PyInstaller cannot discover automatically (they are
+  # loaded via the C++ runtime, not via Python imports).  The most critical
+  # one is libtbb — without it the executable crashes with:
+  #   undefined symbol: _ZN3tbb6detail2r18allocateE...
+  echo "[SETUP] Collecting system shared libraries for bundling..."
+  local extra_bins=""
+  for lib in libtbb.so.12 libtbbmalloc.so.2 libtbbmalloc_proxy.so.2; do
+    local lib_path
+    lib_path=$(find /usr/lib -name "${lib}" -type f 2>/dev/null | head -1)
+    if [[ -n "$lib_path" ]]; then
+      extra_bins+="--add-binary ${lib_path}:. "
+      echo "[SETUP]   Bundling: ${lib_path}"
+    fi
+  done
+
   # Build the standalone executable using PyInstaller
   echo "[BUILD] Building standalone executable with PyInstaller..."
   # shellcheck disable=SC2046,SC2086
-  pyinstaller --onefile --distpath $DIST_DIR $SCRIPT_PATH $(echo $SHARED_LIBS | xargs -n 1 echo --add-binary)
+  pyinstaller --onefile --distpath $DIST_DIR $SCRIPT_PATH \
+    $(echo $SHARED_LIBS | xargs -n 1 echo --add-binary) \
+    $extra_bins
 
   echo "[SUCCESS] Build complete. Executable is located in the $DIST_DIR directory."
 }
@@ -655,6 +673,7 @@ install_fbgemm_cpu() {
   mkdir -p "${BUILD_DIR}"
   if ! print_exec cmake -S . -B "${BUILD_DIR}" \
     -DFBGEMM_BUILD_BENCHMARKS=ON \
+    -DFBGEMM_BUILD_TESTS=OFF \
     -DFBGEMM_LIBRARY_TYPE=static \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_C_COMPILER="${cc_path}" \
