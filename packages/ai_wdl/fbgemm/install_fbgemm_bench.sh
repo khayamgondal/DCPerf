@@ -146,6 +146,47 @@ run_privileged() {
   fi
 }
 
+# Detect the best available GCC version.
+# Verifies the requested GCC_VERSION exists; if not, scans for the highest
+# versioned gcc-N in PATH and updates GCC_VERSION accordingly.
+detect_gcc() {
+  # First check if the requested version is already available
+  if command -v "gcc-${GCC_VERSION}" &>/dev/null && command -v "g++-${GCC_VERSION}" &>/dev/null; then
+    echo "[DETECT] GCC ${GCC_VERSION} found."
+    return 0
+  fi
+
+  echo "[WARN] gcc-${GCC_VERSION} / g++-${GCC_VERSION} not found. Scanning for alternatives..."
+
+  # Find the highest versioned gcc-N available
+  local best_ver=0
+  for gcc_bin in $(compgen -c gcc- 2>/dev/null | grep -E '^gcc-[0-9]+$' | sort -t- -k2 -n -r); do
+    local ver="${gcc_bin#gcc-}"
+    # Verify matching g++ exists
+    if command -v "g++-${ver}" &>/dev/null; then
+      best_ver="$ver"
+      break
+    fi
+  done
+
+  # Fallback: check if plain gcc/g++ exist
+  if [[ "$best_ver" -eq 0 ]]; then
+    if command -v gcc &>/dev/null && command -v g++ &>/dev/null; then
+      best_ver=$(gcc -dumpversion | cut -d. -f1)
+      echo "[DETECT] Using system default GCC (version ${best_ver})."
+      GCC_VERSION="$best_ver"
+      return 0
+    fi
+    echo "[ERROR] No usable GCC compiler found!"
+    return 1
+  fi
+
+  echo "[DETECT] Found gcc-${best_ver} / g++-${best_ver} as best available."
+  GCC_VERSION="$best_ver"
+  export GCC_VERSION
+  return 0
+}
+
 # Detect and set the Python command to use.
 # Tries python${PYTHON_VERSION} first, then falls back through common names.
 detect_python() {
@@ -243,10 +284,17 @@ install_system_dependencies() {
     libssl-dev \
     build-essential
 
-  # Set up compiler alternatives so gcc/g++ point to the desired version
-  echo "[SETUP] Setting up compiler alternatives..."
-  run_privileged update-alternatives --install /usr/bin/gcc gcc "/usr/bin/gcc-${GCC_VERSION}" 100
-  run_privileged update-alternatives --install /usr/bin/g++ g++ "/usr/bin/g++-${GCC_VERSION}" 100
+  # Verify the requested GCC version was actually installed; fall back if not
+  detect_gcc
+
+  # Set up compiler alternatives so gcc/g++ point to the detected version
+  echo "[SETUP] Setting up compiler alternatives for GCC ${GCC_VERSION}..."
+  if [[ -x "/usr/bin/gcc-${GCC_VERSION}" ]]; then
+    run_privileged update-alternatives --install /usr/bin/gcc gcc "/usr/bin/gcc-${GCC_VERSION}" 100
+    run_privileged update-alternatives --install /usr/bin/g++ g++ "/usr/bin/g++-${GCC_VERSION}" 100
+  else
+    echo "[WARN] /usr/bin/gcc-${GCC_VERSION} not found; skipping update-alternatives"
+  fi
 
   # Verify compiler installation
   echo "[CHECK] GCC version:"
@@ -545,18 +593,38 @@ install_fbgemm_cpu() {
   # default system compiler (which may be GCC 11 inside Docker) and the build
   # will fail on aarch64 because GCC <12 lacks arm_neon_sve_bridge.h and FP16FML
   # assembler support.
+  # Resolve the actual compiler paths – use gcc-N if available, else fall back
+  # to plain gcc/g++ (detect_gcc already updated GCC_VERSION for us).
+  local cc_path cxx_path
+  if command -v "gcc-${GCC_VERSION}" &>/dev/null; then
+    cc_path=$(command -v "gcc-${GCC_VERSION}")
+    cxx_path=$(command -v "g++-${GCC_VERSION}")
+  else
+    cc_path=$(command -v gcc)
+    cxx_path=$(command -v g++)
+  fi
+  echo "[BUILD] Using C compiler:   ${cc_path}"
+  echo "[BUILD] Using C++ compiler: ${cxx_path}"
+
   echo "[BUILD] Configuring FBGEMM C++ library with CMake..."
   mkdir -p "${BUILD_DIR}"
-  print_exec cmake -S . -B "${BUILD_DIR}" \
+  if ! print_exec cmake -S . -B "${BUILD_DIR}" \
     -DFBGEMM_BUILD_BENCHMARKS=ON \
     -DFBGEMM_LIBRARY_TYPE=static \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_C_COMPILER="/usr/bin/gcc-${GCC_VERSION}" \
-    -DCMAKE_CXX_COMPILER="/usr/bin/g++-${GCC_VERSION}" \
-    -GNinja
+    -DCMAKE_C_COMPILER="${cc_path}" \
+    -DCMAKE_CXX_COMPILER="${cxx_path}" \
+    -GNinja; then
+    echo "[ERROR] CMake configuration failed. FP16Benchmark and EmbeddingSpMDM8BitBenchmark will NOT be available."
+    echo "[ERROR] tbe_inference_benchmark (PyInstaller build) is still usable."
+    return 1
+  fi
 
   echo "[BUILD] Building FBGEMM C++ library (parallelism: ${nproc_val})..."
-  print_exec cmake --build "${BUILD_DIR}" --parallel "${nproc_val}"
+  if ! print_exec cmake --build "${BUILD_DIR}" --parallel "${nproc_val}"; then
+    echo "[ERROR] CMake build failed. FP16Benchmark and EmbeddingSpMDM8BitBenchmark will NOT be available."
+    return 1
+  fi
 
   # Copy benchmark binaries to the benchmarks directory
   echo "[BUILD] Copying benchmark binaries to ${BENCHMARKS_DIR}..."
@@ -651,8 +719,11 @@ main() {
   install_fbgemm
 
   # Build FBGEMM C++ library and copy benchmark binaries
+  # This may fail if an adequate GCC version is unavailable (e.g. GCC <12 on
+  # aarch64).  We allow the script to continue so the PyInstaller-built
+  # tbe_inference_benchmark remains usable.
   echo "[MAIN] Building FBGEMM C++ library..."
-  install_fbgemm_cpu
+  install_fbgemm_cpu || echo "[WARN] FBGEMM C++ library build failed; FP16Benchmark and EmbeddingSpMDM8BitBenchmark unavailable."
 
   # Copy libc10.so for aarch64 platforms (must happen before cleanup removes the venv)
   echo "[MAIN] Copying platform-specific libraries..."
@@ -663,6 +734,11 @@ cat > "${BENCHMARKS_DIR}/run.sh" <<'EOF'
 #!/bin/bash
 # Usage: ./run.sh <binary_name> [args...]
 set -e
+
+# PyInstaller --onefile executables extract hundreds of bundled shared
+# libraries to a temp directory at startup.  The default fd limit (1024)
+# is often too low, causing "Too many open files" errors.  Raise it.
+ulimit -n 65536 2>/dev/null || ulimit -n 8192 2>/dev/null || true
 
 BIN="$1"
 shift
