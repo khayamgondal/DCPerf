@@ -1,20 +1,19 @@
 #!/bin/bash
-# !! Run inside the Conda environment !!
-
-FBGEMM_INC="${FBGEMM_STAGING_DIR}/miniconda/include"
+# Build FBGEMM C++ shared library using system compilers.
+# No conda/miniconda dependency — gtest headers come from system libgtest-dev.
 
 # Note: -Wno-undef is needed to suppress warnings about undefined GTEST_OS_WINDOWS
-# in gtest headers from miniconda, which would otherwise fail with -Werror
+# in gtest headers, which would otherwise fail with -Werror
 cmake \
   -DFBGEMM_CPU_ONLY=ON \
-  -DFBGEMM_BUILD_BENCHMARKS=0 \
+  -DFBGEMM_BUILD_BENCHMARKS=OFF \
   -DFBGEMM_BUILD_TESTS=OFF \
   -DCMAKE_INSTALL_PREFIX="${ADSIM_STAGING_DIR}" \
   -DFBGEMM_LIBRARY_TYPE=shared \
-  -DCMAKE_CXX_COMPILER="clang++" \
-  -DCMAKE_C_COMPILER="clang" \
-  -DCMAKE_CXX_FLAGS="-fopenmp=libomp -I${FBGEMM_INC} -Wno-undef" \
-  -DCMAKE_C_FLAGS="-fopenmp=libomp -I${FBGEMM_INC} -Wno-undef" \
+  -DCMAKE_CXX_COMPILER="${ADSIM_CXX_COMPILER:-clang++}" \
+  -DCMAKE_C_COMPILER="${ADSIM_C_COMPILER:-clang}" \
+  -DCMAKE_CXX_FLAGS="-fopenmp=libomp -Wno-undef" \
+  -DCMAKE_C_FLAGS="-fopenmp=libomp -Wno-undef" \
   ..
 
 # Build the library
