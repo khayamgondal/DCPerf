@@ -234,14 +234,6 @@ install_system_dependencies() {
     run_privileged apt-get update -y
   fi
 
-  # Check if the desired GCC version is available; if not, add ubuntu-toolchain-r PPA
-  if ! apt-cache show "gcc-${GCC_VERSION}" &>/dev/null; then
-    echo "[SETUP] GCC ${GCC_VERSION} not found in default repos, adding ubuntu-toolchain-r PPA..."
-    run_privileged apt-get install -y software-properties-common
-    run_privileged add-apt-repository -y ppa:ubuntu-toolchain-r/test
-    run_privileged apt-get update -y
-  fi
-
   echo "[SETUP] Installing system packages..."
   # NOTE: These packages replace what was previously installed via conda-forge:
   #   - python, python-venv, python-dev  -> replaces conda's Python environment
@@ -267,11 +259,11 @@ install_system_dependencies() {
     python_pkgs=(python3 python3-venv python3-dev)
   fi
 
+  # Install non-compiler packages first so a GCC install failure doesn't
+  # prevent cmake, ninja, etc. from being available.
   # shellcheck disable=SC2086
   run_privileged apt-get install -y \
     "${python_pkgs[@]}" \
-    "gcc-${GCC_VERSION}" \
-    "g++-${GCC_VERSION}" \
     cmake \
     ninja-build \
     git \
@@ -284,7 +276,60 @@ install_system_dependencies() {
     libssl-dev \
     build-essential
 
-  # Verify the requested GCC version was actually installed; fall back if not
+  # ---------------------------------------------------------------------------
+  # Install GCC >= 12  (required on aarch64 for arm_neon_sve_bridge.h / FP16FML)
+  # Strategy: try the requested version first, then cascade 14 → 13 → 12.
+  # If the version isn't in the default repos we add ubuntu-toolchain-r PPA.
+  # ---------------------------------------------------------------------------
+  local gcc_installed=false
+  local gcc_try_versions=("${GCC_VERSION}")
+
+  # Build a fallback list: requested version first, then 14/13/12 (deduped)
+  for v in 14 13 12; do
+    local already=false
+    for existing in "${gcc_try_versions[@]}"; do
+      [[ "$existing" == "$v" ]] && already=true && break
+    done
+    $already || gcc_try_versions+=("$v")
+  done
+
+  local ppa_added=false
+  for ver in "${gcc_try_versions[@]}"; do
+    echo "[SETUP] Trying to install gcc-${ver} / g++-${ver}..."
+
+    # If the package isn't in the cache, add the toolchain PPA (once)
+    if ! apt-cache show "gcc-${ver}" &>/dev/null; then
+      if ! $ppa_added; then
+        echo "[SETUP] gcc-${ver} not in repos, adding ubuntu-toolchain-r/test PPA..."
+        run_privileged apt-get install -y software-properties-common
+        run_privileged add-apt-repository -y ppa:ubuntu-toolchain-r/test
+        run_privileged apt-get update -y
+        ppa_added=true
+      fi
+      # Re-check after PPA
+      if ! apt-cache show "gcc-${ver}" &>/dev/null; then
+        echo "[WARN] gcc-${ver} still not available after adding PPA, trying next..."
+        continue
+      fi
+    fi
+
+    if run_privileged apt-get install -y "gcc-${ver}" "g++-${ver}"; then
+      GCC_VERSION="$ver"
+      export GCC_VERSION
+      gcc_installed=true
+      echo "[SETUP] Successfully installed gcc-${ver} / g++-${ver}."
+      break
+    else
+      echo "[WARN] apt-get install gcc-${ver} failed, trying next..."
+    fi
+  done
+
+  if ! $gcc_installed; then
+    echo "[WARN] Could not install any of gcc-{${gcc_try_versions[*]}}."
+    echo "[WARN] Will attempt to use whatever system GCC is available."
+  fi
+
+  # Verify / fall back to whatever ended up on the system
   detect_gcc
 
   # Set up compiler alternatives so gcc/g++ point to the detected version
