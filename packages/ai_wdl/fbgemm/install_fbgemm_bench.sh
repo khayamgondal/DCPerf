@@ -33,8 +33,8 @@ export GCC_VERSION="${GCC_VERSION:-14}"
 # Dir to create FBGEMM_CPU benchmark
 BUILD_DIR=build_shared
 
-# Python version to use
-PYTHON_VERSION="${PYTHON_VERSION:-3.13}"
+# Python version to use (will be auto-detected if not available)
+PYTHON_VERSION="${PYTHON_VERSION:-3}"
 
 
 ################################################################################
@@ -133,6 +133,42 @@ print_exec () {
 
 
 ################################################################################
+# Privilege and Environment Helpers
+################################################################################
+
+# Run a command with elevated privileges if needed.
+# In Docker containers running as root, sudo is typically not installed.
+run_privileged() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+
+# Detect and set the Python command to use.
+# Tries python${PYTHON_VERSION} first, then falls back through common names.
+detect_python() {
+  local candidates=(
+    "python${PYTHON_VERSION}"
+    python3
+    python
+  )
+  for cmd in "${candidates[@]}"; do
+    if command -v "$cmd" &>/dev/null; then
+      PYTHON_CMD="$cmd"
+      # Update PYTHON_VERSION to match what's actually available
+      PYTHON_VERSION=$($cmd -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "$PYTHON_VERSION")
+      echo "[DETECT] Using Python command: $PYTHON_CMD (version $PYTHON_VERSION)"
+      return 0
+    fi
+  done
+  echo "[ERROR] No usable Python interpreter found!"
+  return 1
+}
+
+
+################################################################################
 # System Dependencies Installation
 ################################################################################
 # These functions install system-level packages via apt that were previously
@@ -147,22 +183,22 @@ install_system_dependencies() {
   echo ""
 
   echo "[SETUP] Updating package lists..."
-  sudo apt-get update -y
+  run_privileged apt-get update -y
 
   # Check if the desired Python version is available; if not, add deadsnakes PPA
   if ! apt-cache show "python${PYTHON_VERSION}" &>/dev/null; then
     echo "[SETUP] Python ${PYTHON_VERSION} not found in default repos, adding deadsnakes PPA..."
-    sudo apt-get install -y software-properties-common
-    sudo add-apt-repository -y ppa:deadsnakes/ppa
-    sudo apt-get update -y
+    run_privileged apt-get install -y software-properties-common
+    run_privileged add-apt-repository -y ppa:deadsnakes/ppa
+    run_privileged apt-get update -y
   fi
 
   # Check if the desired GCC version is available; if not, add ubuntu-toolchain-r PPA
   if ! apt-cache show "gcc-${GCC_VERSION}" &>/dev/null; then
     echo "[SETUP] GCC ${GCC_VERSION} not found in default repos, adding ubuntu-toolchain-r PPA..."
-    sudo apt-get install -y software-properties-common
-    sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
-    sudo apt-get update -y
+    run_privileged apt-get install -y software-properties-common
+    run_privileged add-apt-repository -y ppa:ubuntu-toolchain-r/test
+    run_privileged apt-get update -y
   fi
 
   echo "[SETUP] Installing system packages..."
@@ -175,11 +211,24 @@ install_system_dependencies() {
   #   - libtbb-dev                        -> replaces conda's tbb
   #   - libncurses-dev                    -> replaces conda's ncurses
   #   - libssl-dev                        -> needed for pyOpenSSL
+
+  # Build the package list dynamically — only request python${PYTHON_VERSION}
+  # packages if a specific version (e.g. 3.13) was requested.  When
+  # PYTHON_VERSION is just "3" we rely on the base python3 package.
+  local python_pkgs=()
+  if [[ "$PYTHON_VERSION" != "3" ]]; then
+    python_pkgs=(
+      "python${PYTHON_VERSION}"
+      "python${PYTHON_VERSION}-venv"
+      "python${PYTHON_VERSION}-dev"
+    )
+  else
+    python_pkgs=(python3 python3-venv python3-dev)
+  fi
+
   # shellcheck disable=SC2086
-  sudo apt-get install -y \
-    "python${PYTHON_VERSION}" \
-    "python${PYTHON_VERSION}-venv" \
-    "python${PYTHON_VERSION}-dev" \
+  run_privileged apt-get install -y \
+    "${python_pkgs[@]}" \
     "gcc-${GCC_VERSION}" \
     "g++-${GCC_VERSION}" \
     cmake \
@@ -196,8 +245,8 @@ install_system_dependencies() {
 
   # Set up compiler alternatives so gcc/g++ point to the desired version
   echo "[SETUP] Setting up compiler alternatives..."
-  sudo update-alternatives --install /usr/bin/gcc gcc "/usr/bin/gcc-${GCC_VERSION}" 100
-  sudo update-alternatives --install /usr/bin/g++ g++ "/usr/bin/g++-${GCC_VERSION}" 100
+  run_privileged update-alternatives --install /usr/bin/gcc gcc "/usr/bin/gcc-${GCC_VERSION}" 100
+  run_privileged update-alternatives --install /usr/bin/g++ g++ "/usr/bin/g++-${GCC_VERSION}" 100
 
   # Verify compiler installation
   echo "[CHECK] GCC version:"
@@ -206,6 +255,9 @@ install_system_dependencies() {
   g++ --version | head -1
   echo "[CHECK] CMake version:"
   cmake --version | head -1
+
+  # Auto-detect the actual Python command available after package install
+  detect_python
 
   echo "[SETUP] System dependencies installation complete."
 }
@@ -231,14 +283,18 @@ setup_venv() {
     rm -rf "$VENV_DIR"
   fi
 
-  # Create new virtual environment
+  # Create new virtual environment using the detected Python command
   echo "[SETUP] Creating Python ${PYTHON_VERSION} virtual environment at ${VENV_DIR}..."
-  "python${PYTHON_VERSION}" -m venv "$VENV_DIR"
+  "${PYTHON_CMD:-python3}" -m venv "$VENV_DIR"
 
-  # Activate the virtual environment
+  # Activate the virtual environment — this provides 'python' and 'pip' on PATH
   echo "[SETUP] Activating virtual environment..."
   # shellcheck disable=SC1091
   source "$VENV_DIR/bin/activate"
+
+  # Update PYTHON_VERSION to match what the venv actually provides
+  PYTHON_VERSION=$(python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+  echo "[SETUP] Venv Python version: ${PYTHON_VERSION}"
 
   # Upgrade pip to latest version for better package compatibility
   echo "[SETUP] Upgrading pip..."
@@ -327,9 +383,13 @@ generate_standalone_executable () {
   DIST_DIR="${BENCHMARKS_DIR}"
 
   # Find all shared libraries (.so files) that need to be included in the executable
+  # Detect actual Python version for the _skbuild path (may differ from PYTHON_VERSION variable
+  # if the venv was created with a different Python than originally requested)
   echo "[SETUP] Finding shared libraries to include in the executable..."
+  local actual_pyver
+  actual_pyver=$(python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "${PYTHON_VERSION}")
   # shellcheck disable=SC2086
-  SHARED_LIBS=$(find ./_skbuild/linux-${MACHINE_NAME_LC}-${PYTHON_VERSION} -name "*.so" -printf "%p:fbgemm_gpu\n")
+  SHARED_LIBS=$(find ./_skbuild/linux-${MACHINE_NAME_LC}-${actual_pyver} -name "*.so" -printf "%p:fbgemm_gpu\n")
 
   # Build the standalone executable using PyInstaller
   echo "[BUILD] Building standalone executable with PyInstaller..."
@@ -384,7 +444,10 @@ clone_fbgemm_repo() {
   git clone --recursive https://github.com/pytorch/FBGEMM.git "fbgemm_${FBGEMM_VERSION}"
   git -C "fbgemm_${FBGEMM_VERSION}" checkout "${FBGEMM_VERSION}"
   # Cherry-pick the latest commit from the FBGEMM main branch to fix issue https://github.com/pytorch/FBGEMM/pull/5037
-  git -C "fbgemm_${FBGEMM_VERSION}" cherry-pick 9df97a7090c2c5edecea4fd08bad11ab8a23284c
+  # Use -c flags to set committer identity for headless/Docker environments
+  git -C "fbgemm_${FBGEMM_VERSION}" \
+    -c user.email="build@local" -c user.name="DCPerf Build" \
+    cherry-pick 9df97a7090c2c5edecea4fd08bad11ab8a23284c
 
   # Disable the postbuild script to prevent race conditions during linking
   echo "[SETUP] Disabling postbuild script..."
@@ -477,12 +540,19 @@ install_fbgemm_cpu() {
 
   # Build FBGEMM C++ library directly with CMake
   # This replaces the previous: source .github/scripts/setup_env.bash && build_fbgemm_library
+  # IMPORTANT: Explicitly set CMAKE_C_COMPILER / CMAKE_CXX_COMPILER to the
+  # GCC version we installed (gcc-14/g++-14).  Without this, CMake picks up the
+  # default system compiler (which may be GCC 11 inside Docker) and the build
+  # will fail on aarch64 because GCC <12 lacks arm_neon_sve_bridge.h and FP16FML
+  # assembler support.
   echo "[BUILD] Configuring FBGEMM C++ library with CMake..."
   mkdir -p "${BUILD_DIR}"
   print_exec cmake -S . -B "${BUILD_DIR}" \
     -DFBGEMM_BUILD_BENCHMARKS=ON \
     -DFBGEMM_LIBRARY_TYPE=static \
     -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_COMPILER="/usr/bin/gcc-${GCC_VERSION}" \
+    -DCMAKE_CXX_COMPILER="/usr/bin/g++-${GCC_VERSION}" \
     -GNinja
 
   echo "[BUILD] Building FBGEMM C++ library (parallelism: ${nproc_val})..."
