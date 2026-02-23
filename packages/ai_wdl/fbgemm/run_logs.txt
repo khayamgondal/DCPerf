@@ -344,3 +344,73 @@ pyimod03_ctypes.install.<locals>.PyInstallerImportError: Failed to load dynlib/d
 
 [2026-02-23 12:48:14,627] benchpress.lib.job ERROR   : Job "./benchmarks/ai_wdl/fbgemm/run.sh tbe_inference_benchmark nbit-cpu --num-embeddings=40000000 --bag-size=2 --embedding-dim=96 --batch-size=162 --num-tables=8 --weights-precision=int4 --output-dtype=fp32 --copies=16 --iters=30000" returned non-zero exit status 1
 [2026-02-23 12:48:14,628] benchpress.lib.job INFO    : Running cleanup hooks for "fbgemm_embedding_a_single"
+[2026-02-23 13:26:44,933] benchpress.cli.main INFO    : Using alternative benchmark suite ai.
+[2026-02-23 13:26:44,952] benchpress.cli.main INFO    : Loaded 6 benchmarks and 21 jobs
+[2026-02-23 13:26:48,261] benchpress.cli.main INFO    : Using alternative benchmark suite ai.
+[2026-02-23 13:26:48,280] benchpress.cli.main INFO    : Loaded 6 benchmarks and 21 jobs
+[2026-02-23 13:26:52,727] benchpress.cli.main INFO    : Using alternative benchmark suite ai.
+[2026-02-23 13:26:52,746] benchpress.cli.main INFO    : Loaded 6 benchmarks and 21 jobs
+[2026-02-23 13:34:31,777] benchpress.cli.main INFO    : Using alternative benchmark suite ai.
+[2026-02-23 13:34:31,796] benchpress.cli.main INFO    : Loaded 6 benchmarks and 21 jobs
+[2026-02-23 13:34:31,797] benchpress.cli.commands.run INFO    : Will run 1 job(s)
+[2026-02-23 13:34:32,605] benchpress.lib.job INFO    : Running setup hooks for "fbgemm_embedding_a_single"
+[2026-02-23 13:34:32,613] benchpress.lib.job INFO    : Starting "fbgemm_embedding_a_single"
+[INFO] Linux + aarch64 detected, target binary is tbe_inference_benchmark, libc10.so found:
+       /khayam/share/notebooks/dcperf/DCPerf/benchmarks/ai_wdl/fbgemm/libc10.so
+ERROR:root:Could not load the library 'fbgemm_gpu_py.so'!
+
+
+Failed to load dynlib/dll '/tmp/_MEIeJYDZy/fbgemm_gpu/fbgemm_gpu_py.so'. Most likely this dynlib/dll was not found when the application was frozen.
+
+
+
+Traceback (most recent call last):
+  File "pyimod03_ctypes.py", line 53, in __init__
+  File "ctypes/__init__.py", line 374, in __init__
+OSError: /tmp/_MEIeJYDZy/fbgemm_gpu/fbgemm_gpu_py.so: undefined symbol: _ZN3tbb6detail2r18allocateERPNS0_2d117small_object_poolEmRKNS2_14execution_dataE
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "tbe_inference_benchmark.py", line 26, in <module>
+  File "<frozen importlib._bootstrap>", line 1027, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1006, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 688, in _load_unlocked
+  File "pyimod02_importers.py", line 457, in exec_module
+  File "fbgemm_gpu/__init__.py", line 159, in <module>
+  File "fbgemm_gpu/__init__.py", line 91, in _load_library
+  File "fbgemm_gpu/__init__.py", line 85, in _load_library
+  File "torch/_ops.py", line 1478, in load_library
+  File "pyimod03_ctypes.py", line 55, in __init__
+pyimod03_ctypes.install.<locals>.PyInstallerImportError: Failed to load dynlib/dll '/tmp/_MEIeJYDZy/fbgemm_gpu/fbgemm_gpu_py.so'. Most likely this dynlib/dll was not found when the application was frozen.
+[PYI-1944438:ERROR] Failed to execute script 'tbe_inference_benchmark' due to unhandled exception!
+[2026-02-23 13:34:36,665] benchpress.lib.job INFO    : stderr output: ERROR:root:Could not load the library 'fbgemm_gpu_py.so'!
+
+
+Failed to load dynlib/dll '/tmp/_MEIeJYDZy/fbgemm_gpu/fbgemm_gpu_py.so'. Most likely this dynlib/dll was not found when the application was frozen.
+
+
+
+Traceback (most recent call last):
+  File "pyimod03_ctypes.py", line 53, in __init__
+  File "ctypes/__init__.py", line 374, in __init__
+OSError: /tmp/_MEIeJYDZy/fbgemm_gpu/fbgemm_gpu_py.so: undefined symbol: _ZN3tbb6detail2r18allocateERPNS0_2d117small_object_poolEmRKNS2_14execution_dataE
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "tbe_inference_benchmark.py", line 26, in <module>
+  File "<frozen importlib._bootstrap>", line 1027, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1006, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 688, in _load_unlocked
+  File "pyimod02_importers.py", line 457, in exec_module
+  File "fbgemm_gpu/__init__.py", line 159, in <module>
+  File "fbgemm_gpu/__init__.py", line 91, in _load_library
+  File "fbgemm_gpu/__init__.py", line 85, in _load_library
+  File "torch/_ops.py", line 1478, in load_library
+  File "pyimod03_ctypes.py", line 55, in __init__
+pyimod03_ctypes.install.<locals>.PyInstallerImportError: Failed to load dynlib/dll '/tmp/_MEIeJYDZy/fbgemm_gpu/fbgemm_gpu_py.so'. Most likely this dynlib/dll was not found when the application was frozen.
+[PYI-1944438:ERROR] Failed to execute script 'tbe_inference_benchmark' due to unhandled exception!
+
+[2026-02-23 13:34:36,666] benchpress.lib.job ERROR   : Job "./benchmarks/ai_wdl/fbgemm/run.sh tbe_inference_benchmark nbit-cpu --num-embeddings=40000000 --bag-size=2 --embedding-dim=96 --batch-size=162 --num-tables=8 --weights-precision=int4 --output-dtype=fp32 --copies=16 --iters=30000" returned non-zero exit status 1
+[2026-02-23 13:34:36,667] benchpress.lib.job INFO    : Running cleanup hooks for "fbgemm_embedding_a_single"

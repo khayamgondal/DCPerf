@@ -92,12 +92,30 @@ cleanup, alongside the existing binary removals.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GCC_VERSION` | `14` | Major version of GCC to install via apt |
-| `PYTHON_VERSION` | `3.13` | Python version to install via apt |
+| `PYTHON_VERSION` | `3` | Python version (auto-detected; defaults to system python3) |
 | `PYTORCH_VERSION` | `2.8.0` | PyTorch version to install via pip |
 | `FBGEMM_VERSION` | `fd32631...` | FBGEMM commit hash to build |
 
 ## Prerequisites
 
 - Ubuntu/Debian-based Linux (uses `apt-get`)
-- `sudo` access (for system package installation)
+- Root **or** `sudo` access (for system package installation)
 - Network access to PyPI, GitHub, and `download.pytorch.org`
+
+## Docker / Headless Environment Fixes
+
+The script includes several fixes for running inside Docker containers or
+headless environments (e.g. GH200 bare-metal with only GCC 11/12):
+
+| Fix | Detail |
+|-----|--------|
+| **`run_privileged()`** | Skips `sudo` when running as root (uid 0), avoids "sudo: not found" |
+| **`detect_python()`** | Auto-discovers available `python3.X`; no hard-coded version |
+| **`detect_gcc()`** | Scans for highest installed `gcc-N`; updates `GCC_VERSION` |
+| **Cascading GCC install** | Tries 14 → 13 → 12 with optional PPA; graceful fallback |
+| **Git identity for cherry-pick** | Uses `-c user.email`/`-c user.name` for headless containers |
+| **arm_neon_sve_bridge.h patch** | Guards `#include` in FBGEMM `Utils.h` with `__GNUC__ >= 13` check for GCC 12 |
+| **KleidiAI disable for GCC < 13** | Passes `-DFBGEMM_ENABLE_KLEIDIAI=OFF` to CMake (assembler lacks `fmlal` support) |
+| **TBB library bundling** | Uses `find -L` to follow symlinks when collecting `libtbb.so.*` for PyInstaller |
+| **`ulimit -n 65536`** | Raises open-files limit in `run.sh` to prevent "too many files open" |
+| **`-DFBGEMM_BUILD_TESTS=OFF`** | Skips tests that require `GTest::gmock` (not always available) |

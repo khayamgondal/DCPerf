@@ -493,7 +493,10 @@ generate_standalone_executable () {
   local extra_bins=""
   for lib in libtbb.so.12 libtbbmalloc.so.2 libtbbmalloc_proxy.so.2; do
     local lib_path
-    lib_path=$(find /usr/lib -name "${lib}" -type f 2>/dev/null | head -1)
+    # Use -L to follow symlinks — on Ubuntu the .so files are typically
+    # symlinks (e.g. libtbb.so.12 -> libtbb.so.12.5) and plain -type f
+    # would skip them, leaving the library unbundled.
+    lib_path=$(find -L /usr/lib -name "${lib}" -type f 2>/dev/null | head -1)
     if [[ -n "$lib_path" ]]; then
       extra_bins+="--add-binary ${lib_path}:. "
       echo "[SETUP]   Bundling: ${lib_path}"
@@ -563,6 +566,24 @@ clone_fbgemm_repo() {
   # Disable the postbuild script to prevent race conditions during linking
   echo "[SETUP] Disabling postbuild script..."
   echo "#!/bin/bash" > "fbgemm_${FBGEMM_VERSION}/.github/scripts/fbgemm_gpu_postbuild.bash"
+
+  # ---------------------------------------------------------------------------
+  # Patch: guard arm_neon_sve_bridge.h for GCC < 13
+  #
+  # FBGEMM's include/fbgemm/Utils.h unconditionally includes
+  # <arm_neon_sve_bridge.h>, but that header only ships with GCC >= 13.
+  # When the best available compiler is GCC 12 (e.g. PPA blocked by a
+  # corporate proxy), the SVE source files fail to compile.
+  # Wrap the include so older compilers skip it; the SVE targets will still
+  # fail to link (missing bridge builtins) but the rest of the library
+  # proceeds.
+  # ---------------------------------------------------------------------------
+  local utils_h="fbgemm_${FBGEMM_VERSION}/include/fbgemm/Utils.h"
+  if [[ -f "$utils_h" ]] && grep -q '#include <arm_neon_sve_bridge.h>' "$utils_h"; then
+    echo "[PATCH] Guarding arm_neon_sve_bridge.h include for GCC < 13..."
+    sed -i 's|#include <arm_neon_sve_bridge.h>.*|#if defined(__GNUC__) \&\& __GNUC__ >= 13\n#include <arm_neon_sve_bridge.h>\n#endif|' "$utils_h"
+    echo "[PATCH] Utils.h patched."
+  fi
 
   # Change to the FBGEMM GPU directory
   pushd "fbgemm_${FBGEMM_VERSION}/fbgemm_gpu" || exit 1
@@ -669,8 +690,20 @@ install_fbgemm_cpu() {
   echo "[BUILD] Using C compiler:   ${cc_path}"
   echo "[BUILD] Using C++ compiler: ${cxx_path}"
 
+  # Build extra CMake flags depending on compiler capabilities.
+  # KleidiAI FP16 kernels use 'fmlal' instructions that require both
+  # compiler and assembler support for FEAT_FP16FML.  GCC < 13 on
+  # Ubuntu 22.04 ships with an assembler that rejects these instructions,
+  # so we disable KleidiAI when the detected GCC is too old.
+  local extra_cmake_flags=""
+  if [[ "${GCC_VERSION}" -lt 13 ]]; then
+    echo "[BUILD] GCC ${GCC_VERSION} < 13 — disabling KleidiAI (requires newer assembler)"
+    extra_cmake_flags="-DFBGEMM_ENABLE_KLEIDIAI=OFF"
+  fi
+
   echo "[BUILD] Configuring FBGEMM C++ library with CMake..."
   mkdir -p "${BUILD_DIR}"
+  # shellcheck disable=SC2086
   if ! print_exec cmake -S . -B "${BUILD_DIR}" \
     -DFBGEMM_BUILD_BENCHMARKS=ON \
     -DFBGEMM_BUILD_TESTS=OFF \
@@ -678,6 +711,7 @@ install_fbgemm_cpu() {
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_C_COMPILER="${cc_path}" \
     -DCMAKE_CXX_COMPILER="${cxx_path}" \
+    ${extra_cmake_flags} \
     -GNinja; then
     echo "[ERROR] CMake configuration failed. FP16Benchmark and EmbeddingSpMDM8BitBenchmark will NOT be available."
     echo "[ERROR] tbe_inference_benchmark (PyInstaller build) is still usable."
