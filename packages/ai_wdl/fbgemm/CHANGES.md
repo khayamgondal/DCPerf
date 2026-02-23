@@ -119,3 +119,35 @@ headless environments (e.g. GH200 bare-metal with only GCC 11/12):
 | **TBB library bundling** | Uses `find -L` to follow symlinks when collecting `libtbb.so.*` for PyInstaller |
 | **`ulimit -n 65536`** | Raises open-files limit in `run.sh` to prevent "too many files open" |
 | **`-DFBGEMM_BUILD_TESTS=OFF`** | Skips tests that require `GTest::gmock` (not always available) |
+## Manual GCC 14 Installation (Corporate Proxy Workaround)
+
+If the PPA auto-add fails due to a corporate proxy intercepting SSL (e.g.
+`ssl.SSLCertVerificationError`), GCC 14 can be installed manually **before**
+running the install script. The script's `detect_gcc()` will then pick it up
+automatically.
+
+```bash
+# 1. Add PPA source file directly (bypasses Python's add-apt-repository)
+echo "deb https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu jammy main" \
+  > /etc/apt/sources.list.d/ubuntu-toolchain-r-test.list
+
+# 2. Import GPG key using curl -k to skip SSL verification through proxy
+curl -ksSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x60c317803a41ba51845e371a1e9377a2ba9ef27f" \
+  | gpg --dearmor > /etc/apt/trusted.gpg.d/ubuntu-toolchain-r.gpg
+
+# If curl -k is also blocked, try with explicit proxy:
+# curl -k --proxy http://proxy-web.micron.com:80 -sSL \
+#   "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x60c317803a41ba51845e371a1e9377a2ba9ef27f" \
+#   | gpg --dearmor > /etc/apt/trusted.gpg.d/ubuntu-toolchain-r.gpg
+
+# 3. Update and install
+apt-get update
+apt-get install -y gcc-14 g++-14
+
+# 4. Verify
+g++-14 --version
+```
+
+With GCC 14 installed, the `arm_neon_sve_bridge.h` and KleidiAI assembler
+issues are resolved natively — the source patches and CMake workarounds in the
+script become no-ops.
