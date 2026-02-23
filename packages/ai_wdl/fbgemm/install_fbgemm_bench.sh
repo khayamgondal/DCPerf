@@ -210,149 +210,78 @@ detect_python() {
 
 
 ################################################################################
-# System Dependencies Installation
+# System Dependencies Validation
 ################################################################################
-# These functions install system-level packages via apt that were previously
-# installed through conda-forge (compilers, build tools, libraries).
+# Validates that all required system-level packages are installed.
+# Packages must be installed MANUALLY before running this script.
+# See CHANGES.md for the full list of prerequisites.
 
-install_system_dependencies() {
+validate_system_dependencies() {
   echo "################################################################################"
-  echo "# Install System Dependencies via apt"
+  echo "# Validate System Dependencies"
   echo "#"
   echo "# [$(date --utc +%FT%T.%3NZ)] + ${FUNCNAME[0]} ${*}"
   echo "################################################################################"
   echo ""
 
-  echo "[SETUP] Updating package lists..."
-  run_privileged apt-get update -y
+  local missing=()
 
-  # Check if the desired Python version is available; if not, add deadsnakes PPA
-  if ! apt-cache show "python${PYTHON_VERSION}" &>/dev/null; then
-    echo "[SETUP] Python ${PYTHON_VERSION} not found in default repos, adding deadsnakes PPA..."
-    run_privileged apt-get install -y software-properties-common
-    run_privileged add-apt-repository -y ppa:deadsnakes/ppa
-    run_privileged apt-get update -y
-  fi
-
-  echo "[SETUP] Installing system packages..."
-  # NOTE: These packages replace what was previously installed via conda-forge:
-  #   - python, python-venv, python-dev  -> replaces conda's Python environment
-  #   - gcc-N, g++-N                     -> replaces conda's gxx_linux-<arch>
-  #   - cmake, ninja-build               -> replaces conda's cmake, ninja
-  #   - libopenblas-dev                   -> replaces conda's openblas (provides <cblas.h>)
-  #   - libcrypt-dev                      -> replaces conda's libxcrypt
-  #   - libtbb-dev                        -> replaces conda's tbb
-  #   - libncurses-dev                    -> replaces conda's ncurses
-  #   - libssl-dev                        -> needed for pyOpenSSL
-
-  # Build the package list dynamically — only request python${PYTHON_VERSION}
-  # packages if a specific version (e.g. 3.13) was requested.  When
-  # PYTHON_VERSION is just "3" we rely on the base python3 package.
-  local python_pkgs=()
-  if [[ "$PYTHON_VERSION" != "3" ]]; then
-    python_pkgs=(
-      "python${PYTHON_VERSION}"
-      "python${PYTHON_VERSION}-venv"
-      "python${PYTHON_VERSION}-dev"
-    )
-  else
-    python_pkgs=(python3 python3-venv python3-dev)
-  fi
-
-  # Install non-compiler packages first so a GCC install failure doesn't
-  # prevent cmake, ninja, etc. from being available.
-  # shellcheck disable=SC2086
-  run_privileged apt-get install -y \
-    "${python_pkgs[@]}" \
-    cmake \
-    ninja-build \
-    git \
-    wget \
-    libopenblas-dev \
-    libcrypt-dev \
-    libtbb-dev \
-    libncurses-dev \
-    pkg-config \
-    libssl-dev \
-    build-essential
-
-  # ---------------------------------------------------------------------------
-  # Install GCC >= 12  (required on aarch64 for arm_neon_sve_bridge.h / FP16FML)
-  # Strategy: try the requested version first, then cascade 14 → 13 → 12.
-  # If the version isn't in the default repos we add ubuntu-toolchain-r PPA.
-  # ---------------------------------------------------------------------------
-  local gcc_installed=false
-  local gcc_try_versions=("${GCC_VERSION}")
-
-  # Build a fallback list: requested version first, then 14/13/12 (deduped)
-  for v in 14 13 12; do
-    local already=false
-    for existing in "${gcc_try_versions[@]}"; do
-      [[ "$existing" == "$v" ]] && already=true && break
-    done
-    $already || gcc_try_versions+=("$v")
-  done
-
-  local ppa_added=false
-  for ver in "${gcc_try_versions[@]}"; do
-    echo "[SETUP] Trying to install gcc-${ver} / g++-${ver}..."
-
-    # If the package isn't in the cache, add the toolchain PPA (once)
-    if ! apt-cache show "gcc-${ver}" &>/dev/null; then
-      if ! $ppa_added; then
-        echo "[SETUP] gcc-${ver} not in repos, adding ubuntu-toolchain-r/test PPA..."
-        run_privileged apt-get install -y software-properties-common
-        run_privileged add-apt-repository -y ppa:ubuntu-toolchain-r/test
-        run_privileged apt-get update -y
-        ppa_added=true
-      fi
-      # Re-check after PPA
-      if ! apt-cache show "gcc-${ver}" &>/dev/null; then
-        echo "[WARN] gcc-${ver} still not available after adding PPA, trying next..."
-        continue
-      fi
-    fi
-
-    if run_privileged apt-get install -y "gcc-${ver}" "g++-${ver}"; then
-      GCC_VERSION="$ver"
-      export GCC_VERSION
-      gcc_installed=true
-      echo "[SETUP] Successfully installed gcc-${ver} / g++-${ver}."
-      break
-    else
-      echo "[WARN] apt-get install gcc-${ver} failed, trying next..."
+  # Check required commands
+  for cmd in cmake ninja git wget pkg-config; do
+    if ! command -v "$cmd" &>/dev/null; then
+      missing+=("$cmd")
     fi
   done
 
-  if ! $gcc_installed; then
-    echo "[WARN] Could not install any of gcc-{${gcc_try_versions[*]}}."
-    echo "[WARN] Will attempt to use whatever system GCC is available."
-  fi
-
-  # Verify / fall back to whatever ended up on the system
+  # Check GCC (need gcc-14 / g++-14 for aarch64 SVE/FP16FML support)
   detect_gcc
+  if [[ "${GCC_VERSION}" -lt 14 ]]; then
+    echo "[WARN] GCC ${GCC_VERSION} detected. GCC >= 14 is strongly recommended."
+    echo "[WARN] GCC < 14 may cause build failures (arm_neon_sve_bridge.h, KleidiAI)."
+    echo "[WARN] See CHANGES.md for manual GCC 14 installation instructions."
+  fi
+  echo "[CHECK] GCC version: $(gcc-${GCC_VERSION} --version 2>/dev/null | head -1 || echo 'NOT FOUND')"
 
-  # Set up compiler alternatives so gcc/g++ point to the detected version
-  echo "[SETUP] Setting up compiler alternatives for GCC ${GCC_VERSION}..."
-  if [[ -x "/usr/bin/gcc-${GCC_VERSION}" ]]; then
-    run_privileged update-alternatives --install /usr/bin/gcc gcc "/usr/bin/gcc-${GCC_VERSION}" 100
-    run_privileged update-alternatives --install /usr/bin/g++ g++ "/usr/bin/g++-${GCC_VERSION}" 100
-  else
-    echo "[WARN] /usr/bin/gcc-${GCC_VERSION} not found; skipping update-alternatives"
+  # Check Python
+  detect_python
+  echo "[CHECK] Python: ${PYTHON_CMD} (${PYTHON_VERSION})"
+
+  # Verify python3-venv capability
+  if ! "${PYTHON_CMD:-python3}" -m venv --help &>/dev/null; then
+    missing+=("python3-venv (or python${PYTHON_VERSION}-venv)")
   fi
 
-  # Verify compiler installation
-  echo "[CHECK] GCC version:"
-  gcc --version | head -1
-  echo "[CHECK] G++ version:"
-  g++ --version | head -1
-  echo "[CHECK] CMake version:"
-  cmake --version | head -1
+  # Check required libraries (headers)
+  local required_libs=(
+    "/usr/include/cblas.h:libopenblas-dev"
+    "/usr/include/tbb/tbb.h:libtbb-dev"
+    "/usr/include/openssl/ssl.h:libssl-dev"
+    "/usr/include/ncurses.h:libncurses-dev"
+  )
+  for entry in "${required_libs[@]}"; do
+    local header="${entry%%:*}"
+    local pkg="${entry##*:}"
+    if [[ ! -f "$header" ]]; then
+      missing+=("$pkg")
+    fi
+  done
 
-  # Auto-detect the actual Python command available after package install
-  detect_python
+  # Check cmake version (need >= 3.22)
+  echo "[CHECK] CMake version: $(cmake --version 2>/dev/null | head -1 || echo 'NOT FOUND')"
 
-  echo "[SETUP] System dependencies installation complete."
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    echo ""
+    echo "[ERROR] Missing required packages: ${missing[*]}"
+    echo "[ERROR] Please install them before running this script."
+    echo "[ERROR] See CHANGES.md for the full prerequisites list."
+    echo ""
+    echo "  Quick install (Ubuntu/Debian):"
+    echo "    apt-get install -y ${missing[*]}"
+    echo ""
+    return 1
+  fi
+
+  echo "[CHECK] All system dependencies verified."
 }
 
 
@@ -415,19 +344,17 @@ install_build_tools() {
 
   test_network_connection || return 1
 
-  # NOTE: These packages replace what was previously installed via conda:
-  #   - click, hypothesis, jinja2, numpy, scikit-build, wheel -> same as before (pip)
-  #   - pyOpenSSL -> replaces conda-forge pyOpenSSL
-  #   - pyinstaller -> for generating standalone executables
+  # These are the exact pip packages required (same as original conda script).
+  # See CHANGES.md for version details.
   echo "[INSTALL] Installing Python build tools via pip..."
   (exec_with_retries 3 pip install \
     click \
     hypothesis \
     jinja2 \
     numpy \
-    scikit-build \
+    "scikit-build" \
     wheel \
-    pyOpenSSL \
+    "pyOpenSSL>22.1.0" \
     pyinstaller) || return 1
 
   echo "[INSTALL] Build tools installation complete."
@@ -484,24 +411,43 @@ generate_standalone_executable () {
   # shellcheck disable=SC2086
   SHARED_LIBS=$(find ./_skbuild/linux-${MACHINE_NAME_LC}-${actual_pyver} -name "*.so" -printf "%p:fbgemm_gpu\n")
 
-  # Collect system shared libraries that fbgemm_gpu_py.so depends on at
-  # runtime but that PyInstaller cannot discover automatically (they are
-  # loaded via the C++ runtime, not via Python imports).  The most critical
-  # one is libtbb — without it the executable crashes with:
+  # Collect shared libraries that fbgemm_gpu_py.so depends on at runtime but
+  # that PyInstaller cannot discover automatically (loaded via C++ runtime,
+  # not via Python imports).  The most critical ones are TBB libraries.
+  #
+  # IMPORTANT: We bundle the TBB that ships INSIDE PyTorch (torch/lib/) rather
+  # than the system libtbb-dev.  fbgemm_gpu is built against PyTorch's bundled
+  # TBB (via torch.utils.cmake_prefix_path), so the ABI must match.  The
+  # system libtbb-dev (e.g. 2021.5 from Ubuntu 22.04 apt) has a different ABI
+  # from PyTorch's bundled TBB, causing:
   #   undefined symbol: _ZN3tbb6detail2r18allocateE...
-  echo "[SETUP] Collecting system shared libraries for bundling..."
+  echo "[SETUP] Collecting PyTorch-bundled shared libraries for bundling..."
   local extra_bins=""
-  for lib in libtbb.so.12 libtbbmalloc.so.2 libtbbmalloc_proxy.so.2; do
-    local lib_path
-    # Use -L to follow symlinks — on Ubuntu the .so files are typically
-    # symlinks (e.g. libtbb.so.12 -> libtbb.so.12.5) and plain -type f
-    # would skip them, leaving the library unbundled.
-    lib_path=$(find -L /usr/lib -name "${lib}" -type f 2>/dev/null | head -1)
-    if [[ -n "$lib_path" ]]; then
-      extra_bins+="--add-binary ${lib_path}:. "
-      echo "[SETUP]   Bundling: ${lib_path}"
-    fi
-  done
+  local torch_lib_dir
+  torch_lib_dir=$(python -c "import torch, os; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))" 2>/dev/null || true)
+
+  if [[ -n "$torch_lib_dir" && -d "$torch_lib_dir" ]]; then
+    # Bundle TBB and other critical libraries from PyTorch's lib directory
+    for lib in libtbb.so.2 libtbbmalloc.so.2 libtbbmalloc_proxy.so.2 libgomp.so.1; do
+      local lib_path
+      lib_path=$(find -L "${torch_lib_dir}" -name "${lib}*" -type f 2>/dev/null | head -1)
+      if [[ -n "$lib_path" ]]; then
+        extra_bins+="--add-binary ${lib_path}:. "
+        echo "[SETUP]   Bundling (from torch): ${lib_path}"
+      fi
+    done
+  else
+    echo "[WARN] Could not determine torch lib directory; falling back to system libs"
+    # Fallback: try system TBB (may have ABI mismatch)
+    for lib in libtbb.so.12 libtbbmalloc.so.2 libtbbmalloc_proxy.so.2; do
+      local lib_path
+      lib_path=$(find -L /usr/lib -name "${lib}" -type f 2>/dev/null | head -1)
+      if [[ -n "$lib_path" ]]; then
+        extra_bins+="--add-binary ${lib_path}:. "
+        echo "[SETUP]   Bundling (system): ${lib_path}"
+      fi
+    done
+  fi
 
   # Build the standalone executable using PyInstaller
   echo "[BUILD] Building standalone executable with PyInstaller..."
@@ -792,9 +738,9 @@ main() {
   echo "[MAIN] Setting up directories..."
   setup_directories
 
-  # Install system-level dependencies via apt
-  echo "[MAIN] Installing system dependencies..."
-  install_system_dependencies
+  # Validate that all system-level dependencies are installed
+  echo "[MAIN] Validating system dependencies..."
+  validate_system_dependencies
 
   # Set up Python virtual environment (replaces Miniconda + conda env)
   echo "[MAIN] Setting up Python virtual environment..."
